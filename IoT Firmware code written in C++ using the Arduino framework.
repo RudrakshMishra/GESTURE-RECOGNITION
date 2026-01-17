@@ -1,0 +1,205 @@
+/*
+ * Advanced Gesture Control with LED Feedback and Actions
+ * Demonstrates real-world applications of gesture recognition
+ */
+
+#include <Wire.h>
+#include <MPU6050.h>
+// #include <your_project_inferencing.h>  // Replace with your library
+
+MPU6050 mpu;
+
+// Pin definitions
+#define LED_UP_DOWN     2    // GPIO 2 - Built-in LED
+#define LED_LEFT_RIGHT  4    // GPIO 4 - External LED
+#define LED_CIRCLE      5    // GPIO 5 - External LED
+#define RELAY_PIN       13   // GPIO 13 - Control relay/device
+
+// Sampling settings
+#define FREQUENCY_HZ        100
+#define INTERVAL_MS         (1000 / FREQUENCY_HZ)
+#define CONFIDENCE_THRESHOLD 0.7
+
+static float features[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+static int feature_ix = 0;
+unsigned long last_sample_time = 0;
+
+// Gesture tracking
+String last_gesture = "none";
+unsigned long gesture_start_time = 0;
+const unsigned long GESTURE_HOLD_TIME = 1500; // 1.5 seconds
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  
+  // Initialize pins
+  pinMode(LED_UP_DOWN, OUTPUT);
+  pinMode(LED_LEFT_RIGHT, OUTPUT);
+  pinMode(LED_CIRCLE, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  
+  // Initialize MPU6050
+  mpu.initialize();
+  
+  if (!mpu.testConnection()) {
+    Serial.println("❌ MPU6050 connection failed!");
+    while (1) {
+      digitalWrite(LED_UP_DOWN, !digitalRead(LED_UP_DOWN));
+      delay(200);
+    }
+  }
+  
+  // Startup sequence
+  startupAnimation();
+  
+  Serial.println("✓ Gesture Control System Active!");
+  Serial.println("Perform gestures to control devices\n");
+}
+
+void loop() {
+  unsigned long current_time = millis();
+  
+  if (current_time - last_sample_time >= INTERVAL_MS) {
+    last_sample_time = current_time;
+    
+    // Read sensor data
+    int16_t ax, ay, az, gx, gy, gz;
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    
+    // Convert and store in feature buffer
+    if (feature_ix < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE) {
+      features[feature_ix++] = ax / 16384.0;
+      features[feature_ix++] = ay / 16384.0;
+      features[feature_ix++] = az / 16384.0;
+      features[feature_ix++] = gx / 131.0;
+      features[feature_ix++] = gy / 131.0;
+      features[feature_ix++] = gz / 131.0;
+    }
+    
+    // Run inference when buffer is full
+    if (feature_ix >= EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE) {
+      feature_ix = 0;
+      
+      ei_impulse_result_t result = { 0 };
+      signal_t signal;
+      numpy::signal_from_buffer(features, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, &signal);
+      
+      EI_IMPULSE_ERROR res = run_classifier(&signal, &result, false);
+      
+      if (res == 0) {
+        processGestureResult(result);
+      }
+    }
+  }
+}
+
+void processGestureResult(ei_impulse_result_t result) {
+  // Find highest confidence prediction
+  float max_confidence = 0;
+  int max_index = 0;
+  
+  for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+    if (result.classification[i].value > max_confidence) {
+      max_confidence = result.classification[i].value;
+      max_index = i;
+    }
+  }
+  
+  // Only act if confidence is high enough
+  if (max_confidence > CONFIDENCE_THRESHOLD) {
+    String detected_gesture = String(result.classification[max_index].label);
+    
+    // Gesture debouncing and hold detection
+    if (detected_gesture == last_gesture) {
+      if (millis() - gesture_start_time > GESTURE_HOLD_TIME) {
+        executeGestureAction(detected_gesture);
+        gesture_start_time = millis(); // Reset to avoid repeated triggers
+      }
+    } else {
+      last_gesture = detected_gesture;
+      gesture_start_time = millis();
+      
+      // Immediate visual feedback
+      updateLEDs(detected_gesture);
+      
+      Serial.printf("👋 Gesture detected: %s (%.0f%%)\n", 
+                   detected_gesture.c_str(), 
+                   max_confidence * 100);
+    }
+  } else {
+    // No confident gesture detected
+    if (last_gesture != "none") {
+      last_gesture = "none";
+      allLEDsOff();
+    }
+  }
+}
+
+void executeGestureAction(String gesture) {
+  Serial.printf("⚡ Executing action for: %s\n", gesture.c_str());
+  
+  if (gesture == "up-down") {
+    // Toggle relay (turn device on/off)
+    digitalWrite(RELAY_PIN, !digitalRead(RELAY_PIN));
+    Serial.println("   → Device toggled!");
+    blinkLED(LED_UP_DOWN, 3);
+    
+  } else if (gesture == "left-right") {
+    // Brightness control simulation
+    Serial.println("   → Brightness adjusted!");
+    blinkLED(LED_LEFT_RIGHT, 2);
+    
+  } else if (gesture == "circle") {
+    // Mode change
+    Serial.println("   → Mode changed!");
+    blinkLED(LED_CIRCLE, 4);
+    
+  } else if (gesture == "rest") {
+    // All off / reset
+    digitalWrite(RELAY_PIN, LOW);
+    allLEDsOff();
+    Serial.println("   → All devices OFF!");
+  }
+}
+
+void updateLEDs(String gesture) {
+  allLEDsOff();
+  
+  if (gesture == "up-down") {
+    digitalWrite(LED_UP_DOWN, HIGH);
+  } else if (gesture == "left-right") {
+    digitalWrite(LED_LEFT_RIGHT, HIGH);
+  } else if (gesture == "circle") {
+    digitalWrite(LED_CIRCLE, HIGH);
+  }
+}
+
+void allLEDsOff() {
+  digitalWrite(LED_UP_DOWN, LOW);
+  digitalWrite(LED_LEFT_RIGHT, LOW);
+  digitalWrite(LED_CIRCLE, LOW);
+}
+
+void blinkLED(int pin, int times) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(pin, HIGH);
+    delay(100);
+    digitalWrite(pin, LOW);
+    delay(100);
+  }
+}
+
+void startupAnimation() {
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(LED_UP_DOWN, HIGH);
+    delay(100);
+    digitalWrite(LED_UP_DOWN, LOW);
+    digitalWrite(LED_LEFT_RIGHT, HIGH);
+    delay(100);
+    digitalWrite(LED_LEFT_RIGHT, LOW);
+    digitalWrite(LED_CIRCLE, HIGH);
+    delay(100);
+    digitalWrite(LED_CIRCLE, LOW);
+  }
+}
